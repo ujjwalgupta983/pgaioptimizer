@@ -1,551 +1,702 @@
 # Architecture
 
-## End-to-End Data Flow
+## System Overview
 
+```mermaid
+graph TB
+    subgraph "Target Environments"
+        RDS["☁️ AWS RDS / Aurora"]
+        GCS["☁️ GCP Cloud SQL"]
+        AZ["☁️ Azure Database"]
+        SH["🖥️ Self-Hosted PG"]
+    end
+
+    subgraph "pgaioptimizer"
+        subgraph "Collection Layer"
+            SQL["Tier 1: SQL Collector<br/>pg_stat_* views<br/>(works everywhere)"]
+            CLOUD["Tier 2: Cloud Enrichment<br/>CloudWatch / GCP Mon / Azure Mon<br/>(managed PG only)"]
+            AGENT["Tier 3: OS Agent<br/>/proc/* + PG extensions<br/>(self-hosted only)"]
+        end
+
+        subgraph "Storage Layer"
+            MEM["In-Memory Ring Buffer<br/>(last 2 hours, real-time)"]
+            DUCK["DuckDB Columnar Store<br/>(2h–30d, compressed)"]
+        end
+
+        subgraph "Analysis Layer"
+            RULES["Rule Engine<br/>Threshold · Formula<br/>Pattern · Correlation"]
+            SCORE["Scoring Engine<br/>Weighted 0–100"]
+            PRED["Prediction Engine<br/>Impact Estimation"]
+            CORR["Cross-Category<br/>Correlator"]
+        end
+
+        subgraph "Output Layer"
+            API["REST API"]
+            HTML["HTML Report"]
+            JSON["JSON Export"]
+            DASH["Web Dashboard<br/>React + Recharts"]
+        end
+    end
+
+    RDS --> SQL
+    GCS --> SQL
+    AZ --> SQL
+    SH --> SQL
+    RDS -.->|optional| CLOUD
+    GCS -.->|optional| CLOUD
+    AZ -.->|optional| CLOUD
+    SH --> AGENT
+
+    SQL --> MEM
+    CLOUD --> MEM
+    AGENT --> MEM
+    MEM --> DUCK
+    MEM --> RULES
+    DUCK --> RULES
+    RULES --> SCORE
+    RULES --> PRED
+    RULES --> CORR
+    SCORE --> API
+    PRED --> API
+    CORR --> API
+    API --> HTML
+    API --> JSON
+    API --> DASH
 ```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│  1. CONNECT  │───▶│  2. COLLECT   │───▶│  3. STORE    │───▶│  4. ANALYZE  │───▶│  5. REPORT   │
-│              │    │              │    │              │    │              │    │              │
-│ Target PG    │    │ SQL queries  │    │ In-memory or │    │ Rule engine  │    │ Scored report│
-│ connection   │    │ OS metrics   │    │ SQLite       │    │ Correlation  │    │ with fixes   │
-│ validation   │    │ Cloud APIs   │    │ snapshots    │    │ Prediction   │    │ and estimates│
-└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+
+---
+
+## Data Collection Pipeline
+
+```mermaid
+sequenceDiagram
+    participant CLI as CLI / Scheduler
+    participant COL as Collector
+    participant PG as Target PostgreSQL
+    participant OS as OS (/proc/*)
+    participant CW as Cloud API
+    participant BUF as Ring Buffer
+    participant DB as DuckDB
+
+    CLI->>COL: trigger collection
+    
+    par Tier 1: SQL Stats
+        COL->>PG: SELECT * FROM pg_stat_database
+        COL->>PG: SELECT * FROM pg_stat_user_tables
+        COL->>PG: SELECT * FROM pg_stat_user_indexes
+        COL->>PG: SELECT * FROM pg_stat_statements
+        COL->>PG: SELECT * FROM pg_stat_activity
+        COL->>PG: SELECT * FROM pg_stat_bgwriter
+        COL->>PG: SELECT * FROM pg_stat_wal (PG14+)
+        COL->>PG: SELECT * FROM pg_stat_io (PG16+)
+        COL->>PG: SELECT * FROM pg_settings
+        COL->>PG: SELECT * FROM pg_locks
+        COL->>PG: SELECT * FROM pg_sequences
+        COL->>PG: SELECT * FROM pg_stat_replication
+        PG-->>COL: raw metric rows
+    and Tier 2: Cloud Metrics (if configured)
+        COL->>CW: GetMetricData(CPUUtilization, FreeableMemory, ...)
+        CW-->>COL: OS-level metrics
+    and Tier 3: OS Metrics (agent mode only)
+        COL->>OS: read /proc/stat (CPU)
+        COL->>OS: read /proc/meminfo (memory)
+        COL->>OS: read /proc/diskstats (disk I/O)
+        COL->>OS: read /proc/{pg_pid}/* (per-backend)
+        OS-->>COL: system metrics
+    end
+
+    COL->>BUF: store snapshot (in-memory)
+    COL->>DB: persist snapshot (async, columnar)
+    
+    Note over BUF,DB: Ring buffer holds ~7,200 snapshots (2h @ 1/sec)<br/>DuckDB holds 30 days compressed
 ```
 
-### Step 1: Connect
-- Parse DSN or individual host/port/db/user/password
-- Establish connection pool via `pgx` (3 connections default)
-- Validate connectivity with `SELECT 1`
-- Detect: PG version, superuser status, installed extensions, server OS
+### Collection Timing
 
-### Step 2: Collect
-- Run 60+ diagnostic SQL queries against `pg_stat_*` views
-- All queries are **read-only** (`SELECT` only, no temp tables, no functions)
-- Tier 3 (agent): also read `/proc/*` for OS metrics
-- Tier 2 (cloud): also call CloudWatch/GCP/Azure APIs
-- Entire collection phase takes 2-5 seconds
-
-### Step 3: Store
-- **Scan mode**: all data stays in-memory structs, discarded after report
-- **Agent mode**: snapshots written to local SQLite every N seconds
-- Delta computation for rate-based metrics (queries/sec, blocks/sec)
-
-### Step 4: Analyze
-- Each of 12 analyzers processes its relevant data
-- Rule engine evaluates thresholds, formulas, and patterns
-- Cross-category correlator links related findings
-- Scoring engine computes weighted health score
-- Prediction engine estimates improvement impact
-
-### Step 5: Report
-- Findings sorted by severity (critical → info)
-- Each finding includes: description, current value, recommended value, SQL fix, estimated impact
-- Output as HTML report, JSON, or served via web dashboard
+| Metric Group | Queries | Avg Latency | Frequency |
+|:---|:---|:---|:---|
+| Database stats | 3 queries | ~5ms | Every snapshot |
+| Table stats | 2 queries | ~10-50ms (depends on table count) | Every snapshot |
+| Index stats | 2 queries | ~10-50ms | Every snapshot |
+| Query stats | 1 query | ~5-20ms | Every snapshot |
+| Connection stats | 1 query | ~3ms | Every snapshot |
+| Lock stats | 1 query | ~3ms | Every snapshot |
+| Settings | 1 query | ~5ms | Every 5 minutes (rarely changes) |
+| Schema info | 3-5 queries | ~20-100ms | Every 15 minutes |
+| OS metrics | filesystem reads | ~1ms | Every snapshot (Tier 3) |
+| **Total** | **~15-20 queries** | **~50-250ms** | **Every 30-60 seconds** |
 
 ---
 
 ## Storage Architecture
 
-### Scan Mode (stateless, in-memory)
+### Why DuckDB over SQLite
 
-No persistent storage. Data flows through Go structs:
+Our query patterns are **analytical** — aggregations over time ranges, rate computations, trend detection. DuckDB is purpose-built for this.
 
+| Query Pattern | SQLite (row-store) | DuckDB (columnar) |
+|:---|:---|:---|
+| "Avg cache hit ratio over 7 days" | Scans all rows, all columns | Reads only 1 column, vectorized |
+| "Top 10 queries by time delta in 24h" | Full join + sort | Columnar join, 10-50x faster |
+| "Rate of 15 metrics over 30 days" | ~3 seconds | ~30ms |
+| "Downsample to 1h buckets" | Manual GROUP BY, slow | Native window functions, fast |
+| Compression ratio | ~1x (no compression) | ~5-10x (columnar + zstd) |
+| Storage for 30 days | ~200-500MB | ~30-80MB |
+
+### Storage Tiers
+
+```mermaid
+graph LR
+    subgraph "Hot — In-Memory Ring Buffer"
+        direction TB
+        H1["Last 2 hours of snapshots"]
+        H2["~7,200 data points"]
+        H3["Instant access, no disk I/O"]
+        H4["Used for: real-time dashboard"]
+    end
+
+    subgraph "Warm — DuckDB (recent)"
+        direction TB
+        W1["2 hours → 7 days"]
+        W2["1-minute granularity"]
+        W3["Columnar + zstd compressed"]
+        W4["Used for: trend analysis, alerts"]
+    end
+
+    subgraph "Cold — DuckDB (historical)"
+        direction TB
+        C1["7 → 30 days"]
+        C2["Downsampled to 5-min buckets"]
+        C3["Heavily compressed"]
+        C4["Used for: long-term trends, reports"]
+    end
+
+    H1 -->|"flush every 2h"| W1
+    W1 -->|"downsample at 7d"| C1
+    C1 -->|"prune at 30d"| DEL["🗑️ Auto-delete"]
 ```
-CollectedStats {
-  Database:    pg_stat_database rows
-  Tables:      pg_stat_user_tables rows
-  Indexes:     pg_stat_user_indexes rows
-  Queries:     pg_stat_statements rows (if available)
-  Activity:    pg_stat_activity rows
-  BGWriter:    pg_stat_bgwriter row
-  WAL:         pg_stat_wal row (PG14+)
-  IO:          pg_stat_io rows (PG16+)
-  Settings:    pg_settings rows
-  Locks:       pg_locks rows
-  Sequences:   pg_sequences rows
-  Replication: pg_stat_replication rows
-  Schema:      information_schema rows
-  OSMetrics:   /proc/* data (Tier 3 only)
-}
-```
 
-### Agent Mode (SQLite, time-series snapshots)
+### DuckDB Schema
 
 ```sql
--- Core snapshot tracking
+-- Snapshot metadata
 CREATE TABLE snapshots (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    taken_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    pg_version  TEXT,
-    duration_ms INTEGER  -- how long collection took
+    id            UINTEGER PRIMARY KEY,
+    taken_at      TIMESTAMP NOT NULL,
+    duration_ms   USMALLINT,
+    pg_version    UINTEGER,
+    tier          UTINYINT   -- 1=SQL, 2=cloud, 3=agent
 );
 
 -- Database-level metrics (one row per snapshot)
-CREATE TABLE metric_database (
-    snapshot_id     INTEGER REFERENCES snapshots(id),
-    xact_commit     BIGINT,
-    xact_rollback   BIGINT,
-    blks_read       BIGINT,
-    blks_hit        BIGINT,
-    tup_returned    BIGINT,
-    tup_fetched     BIGINT,
-    tup_inserted    BIGINT,
-    tup_updated     BIGINT,
-    tup_deleted     BIGINT,
-    deadlocks       BIGINT,
-    temp_files       BIGINT,
-    temp_bytes       BIGINT,
-    cache_hit_ratio REAL   -- computed: blks_hit / (blks_hit + blks_read)
+CREATE TABLE m_database (
+    snapshot_id      UINTEGER NOT NULL,
+    taken_at         TIMESTAMP NOT NULL,  -- denormalized for partition pruning
+    xact_commit      UBIGINT,
+    xact_rollback    UBIGINT,
+    blks_read        UBIGINT,
+    blks_hit         UBIGINT,
+    tup_returned     UBIGINT,
+    tup_fetched      UBIGINT,
+    tup_inserted     UBIGINT,
+    tup_updated      UBIGINT,
+    tup_deleted      UBIGINT,
+    deadlocks        UBIGINT,
+    temp_files       UBIGINT,
+    temp_bytes       UBIGINT,
+    blk_read_time    DOUBLE,
+    blk_write_time   DOUBLE
 );
 
 -- Table-level metrics (one row per table per snapshot)
-CREATE TABLE metric_tables (
-    snapshot_id    INTEGER REFERENCES snapshots(id),
-    schema_name    TEXT,
-    table_name     TEXT,
-    seq_scan       BIGINT,
-    idx_scan       BIGINT,
-    n_live_tup     BIGINT,
-    n_dead_tup     BIGINT,
-    last_vacuum    TIMESTAMP,
+CREATE TABLE m_tables (
+    snapshot_id     UINTEGER NOT NULL,
+    taken_at        TIMESTAMP NOT NULL,
+    schema_name     VARCHAR,
+    table_name      VARCHAR,
+    seq_scan        UBIGINT,
+    seq_tup_read    UBIGINT,
+    idx_scan        UBIGINT,
+    idx_tup_fetch   UBIGINT,
+    n_tup_ins       UBIGINT,
+    n_tup_upd       UBIGINT,
+    n_tup_del       UBIGINT,
+    n_live_tup      UBIGINT,
+    n_dead_tup      UBIGINT,
+    last_vacuum     TIMESTAMP,
     last_autovacuum TIMESTAMP,
-    last_analyze   TIMESTAMP,
-    table_size     BIGINT,
-    dead_ratio     REAL    -- computed
+    last_analyze    TIMESTAMP,
+    table_bytes     UBIGINT,
+    toast_bytes     UBIGINT,
+    index_bytes     UBIGINT
 );
 
--- Query metrics (top N queries per snapshot)
-CREATE TABLE metric_queries (
-    snapshot_id     INTEGER REFERENCES snapshots(id),
-    query_hash      TEXT,   -- queryid from pg_stat_statements
-    query_text      TEXT,
-    calls           BIGINT,
-    total_exec_time REAL,
-    mean_exec_time  REAL,
-    shared_blks_read  BIGINT,
-    shared_blks_hit   BIGINT,
-    temp_blks_written BIGINT,
-    cache_hit_ratio   REAL
+-- Query metrics from pg_stat_statements (top N per snapshot)
+CREATE TABLE m_queries (
+    snapshot_id       UINTEGER NOT NULL,
+    taken_at          TIMESTAMP NOT NULL,
+    queryid           BIGINT,
+    query_text        VARCHAR,
+    calls             UBIGINT,
+    total_exec_time   DOUBLE,
+    mean_exec_time    DOUBLE,
+    stddev_exec_time  DOUBLE,
+    rows              UBIGINT,
+    shared_blks_hit   UBIGINT,
+    shared_blks_read  UBIGINT,
+    temp_blks_read    UBIGINT,
+    temp_blks_written UBIGINT,
+    blk_read_time     DOUBLE,
+    blk_write_time    DOUBLE
 );
 
--- OS metrics (Tier 3 only)
-CREATE TABLE metric_os (
-    snapshot_id    INTEGER REFERENCES snapshots(id),
-    cpu_user       REAL,
-    cpu_system     REAL,
-    cpu_iowait     REAL,
-    mem_total      BIGINT,
-    mem_available  BIGINT,
-    mem_cached     BIGINT,
-    disk_read_iops  REAL,
-    disk_write_iops REAL,
-    disk_read_bytes BIGINT,
-    disk_write_bytes BIGINT
+-- Connection state summary (one row per snapshot)
+CREATE TABLE m_connections (
+    snapshot_id       UINTEGER NOT NULL,
+    taken_at          TIMESTAMP NOT NULL,
+    total             USMALLINT,
+    active            USMALLINT,
+    idle              USMALLINT,
+    idle_in_txn       USMALLINT,
+    waiting           USMALLINT,
+    max_connections   USMALLINT,
+    longest_query_sec UINTEGER,
+    longest_txn_sec   UINTEGER
 );
 
--- Historical reports
-CREATE TABLE reports (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    generated_at TIMESTAMP NOT NULL,
-    overall_score REAL,
-    grade        TEXT,
-    report_json  TEXT  -- full HealthReport as JSON
+-- OS metrics (Tier 3 agent only)
+CREATE TABLE m_os (
+    snapshot_id       UINTEGER NOT NULL,
+    taken_at          TIMESTAMP NOT NULL,
+    cpu_user_pct      FLOAT,
+    cpu_system_pct    FLOAT,
+    cpu_iowait_pct    FLOAT,
+    cpu_idle_pct      FLOAT,
+    mem_total_bytes   UBIGINT,
+    mem_available_bytes UBIGINT,
+    mem_cached_bytes  UBIGINT,
+    mem_buffers_bytes UBIGINT,
+    swap_used_bytes   UBIGINT,
+    disk_read_ops     UBIGINT,
+    disk_write_ops    UBIGINT,
+    disk_read_bytes   UBIGINT,
+    disk_write_bytes  UBIGINT,
+    disk_io_time_ms   UBIGINT
+);
+
+-- Downsampled 5-minute rollups (auto-generated)
+CREATE TABLE m_database_5m (
+    bucket           TIMESTAMP NOT NULL,  -- floor to 5 min
+    xact_commit_rate DOUBLE,   -- per second
+    blks_read_rate   DOUBLE,
+    blks_hit_rate    DOUBLE,
+    cache_hit_ratio  DOUBLE,
+    tup_fetched_rate DOUBLE,
+    deadlocks_delta  UBIGINT,
+    temp_files_delta UBIGINT
 );
 ```
 
-**Retention policy**: Default 30 days. Configurable. Old snapshots auto-pruned.
+### Rate Computation
 
-**Delta computation**: For cumulative counters (like `blks_read`), rates are computed as:
+All `pg_stat_*` counters are cumulative. We compute rates from adjacent snapshots:
+
+```mermaid
+graph LR
+    S1["Snapshot T₁<br/>blks_read = 1,000,000"]
+    S2["Snapshot T₂<br/>blks_read = 1,005,000<br/>Δt = 60 seconds"]
+    RATE["Rate = (1,005,000 − 1,000,000) / 60<br/>= 83.3 blocks/sec"]
+    
+    S1 --> RATE
+    S2 --> RATE
 ```
-rate = (current_value - previous_value) / time_delta_seconds
+
+```go
+// Rate computation handles counter resets (e.g., pg_stat_reset)
+func computeRate(prev, curr uint64, deltaSeconds float64) float64 {
+    if curr < prev {
+        return 0 // counter was reset, skip this interval
+    }
+    return float64(curr-prev) / deltaSeconds
+}
 ```
 
 ---
 
 ## Analysis Engine
 
-### Rule Types
+### Rule Processing Pipeline
 
-The analysis engine uses four types of rules, from simple to complex:
+```mermaid
+graph TB
+    subgraph "Input"
+        SNAP["Current Snapshot<br/>+ Historical Data"]
+    end
 
-#### Type 1: Threshold Rules
-Compare a single metric against a known-good range.
+    subgraph "Rule Engine (per category)"
+        T["① Threshold Rules<br/>Single metric vs known range<br/>Confidence: HIGH"]
+        F["② Formula Rules<br/>Derived metric vs computed target<br/>Confidence: HIGH"]
+        P["③ Pattern Rules<br/>Multi-condition detection<br/>Confidence: MEDIUM"]
+        C["④ Correlation Rules<br/>Cross-category root cause<br/>Confidence: MEDIUM"]
+    end
 
-```
-Rule: cache_hit_ratio
-  IF value >= 99%  → OK,    score_impact: 0
-  IF value >= 95%  → OK,    score_impact: -5
-  IF value >= 90%  → INFO,  score_impact: -15
-  IF value >= 80%  → WARN,  score_impact: -30
-  IF value <  80%  → CRIT,  score_impact: -50
-```
+    subgraph "Scoring"
+        SC["Category Score<br/>Start: 100<br/>CRIT: −20 to −40<br/>WARN: −5 to −20<br/>INFO: −1 to −5"]
+    end
 
-Examples:
-| Metric | OK | WARNING | CRITICAL |
-|:---|:---|:---|:---|
-| Cache hit ratio | ≥95% | 80-95% | <80% |
-| Dead tuple ratio | <5% | 5-20% | >20% |
-| Connection utilization | <70% | 70-90% | >90% |
-| Sequence exhaustion | <50% | 50-80% | >80% |
+    subgraph "Prediction"
+        EST["Impact Estimator<br/>Uses PG cost model<br/>+ workload stats"]
+    end
 
-#### Type 2: Formula Rules
-Compute a recommended value from system parameters, compare to actual.
+    subgraph "Output"
+        FIND["Findings[]<br/>severity + description<br/>+ SQL fix + confidence<br/>+ estimated impact"]
+    end
 
-```
-Rule: shared_buffers
-  recommended = total_ram * 0.25
-  actual = current_setting('shared_buffers')
-  IF actual < recommended * 0.6  → WARNING ("shared_buffers is too low")
-  IF actual > recommended * 1.6  → INFO ("shared_buffers may be too high")
-
-Rule: work_mem
-  recommended = (total_ram - shared_buffers) / (3 * max_connections)
-  actual = current_setting('work_mem')
-  IF actual == '4MB' (default) → WARNING ("work_mem is at default")
-  IF actual < recommended * 0.5 → WARNING ("work_mem is too low")
+    SNAP --> T --> SC
+    SNAP --> F --> SC
+    SNAP --> P --> SC
+    SNAP --> C --> SC
+    SC --> FIND
+    T --> EST --> FIND
+    F --> EST --> FIND
+    P --> EST --> FIND
 ```
 
-#### Type 3: Pattern Rules
-Detect multi-condition patterns in the data.
+### Rule Type Details
+
+#### ① Threshold Rules — compare metric to known range
 
 ```
-Rule: missing_index
+cache_hit_ratio:
+  ≥99%  → OK       (score: −0)
+  ≥95%  → OK       (score: −5)
+  ≥90%  → INFO     (score: −15)
+  ≥80%  → WARNING  (score: −30)
+  <80%  → CRITICAL (score: −50)
+  confidence: HIGH (direct measurement)
+
+dead_tuple_ratio (per table):
+  <5%   → OK
+  <10%  → INFO
+  <20%  → WARNING  ("VACUUM ANALYZE {table};")
+  ≥20%  → CRITICAL ("VACUUM FULL {table}; -- requires exclusive lock")
+  confidence: HIGH (exact count from pg_stat_user_tables)
+
+connection_utilization:
+  <50%  → OK
+  <70%  → INFO
+  <85%  → WARNING  ("Consider PgBouncer")
+  ≥85%  → CRITICAL ("Risk of connection exhaustion")
+  confidence: HIGH (exact from pg_stat_activity vs max_connections)
+```
+
+#### ② Formula Rules — compute target from system params
+
+```
+shared_buffers:
+  recommended = total_ram × 0.25
+  IF actual < recommended × 0.6 → WARNING
+  IF actual > recommended × 1.6 → INFO (diminishing returns)
+  sql_fix: "ALTER SYSTEM SET shared_buffers = '{recommended}';"
+  confidence: HIGH (industry standard for 20+ years)
+
+work_mem:
+  recommended = (total_ram − shared_buffers) / (3 × max_connections)
+  IF actual == 4MB (default)    → WARNING
+  IF actual < recommended × 0.5 → WARNING
+  sql_fix: "ALTER SYSTEM SET work_mem = '{recommended}';"
+  confidence: HIGH (formula from PG docs)
+
+effective_cache_size:
+  recommended = total_ram × 0.625  -- midpoint of 50-75%
+  IF actual < total_ram × 0.40     → WARNING
+  confidence: HIGH (planner hint, no memory allocated)
+```
+
+#### ③ Pattern Rules — multi-condition detection
+
+```
+missing_index:
   FOR EACH table WHERE:
     seq_scan > 1000
-    AND n_live_tup > 100000
-    AND seq_scan > (idx_scan * 10)  -- 10x more seq scans than index scans
-  → WARNING "Table {name} has {seq_scan} sequential scans on {rows} rows"
-  → SQL_FIX: (suggest index based on pg_qualstats data in Tier 3,
-              or general advice in Tier 1)
+    AND n_live_tup > 100,000
+    AND seq_scan > (idx_scan × 10)
+  → WARNING
+  Tier 3 enhancement: use pg_qualstats to identify which
+    columns are filtered, suggest specific index definition
+  confidence: MEDIUM (detects symptom, column choice needs verification)
 
-Rule: unused_index
+unused_index:
   FOR EACH index WHERE:
     idx_scan = 0
     AND NOT indisunique
-    AND stats_age > 7 days  -- ensure stats are meaningful
-  → INFO "Index {name} has never been used"
-  → SQL_FIX: "DROP INDEX CONCURRENTLY {name};"
+    AND NOT indisprimary
+    AND stats_age > 7 days
+  → INFO
+  sql_fix: "DROP INDEX CONCURRENTLY {index_name};"
+  confidence: HIGH (binary: used or not, with stats age check)
 
-Rule: idle_in_transaction
-  FOR EACH connection WHERE:
-    state = 'idle in transaction'
-    AND state_change < now() - interval '5 minutes'
-  → WARNING "Connection {pid} idle in transaction for {duration}"
+duplicate_index:
+  FOR EACH pair of indexes on same table WHERE:
+    index_columns_A == index_columns_B
+    OR index_columns_A is prefix of index_columns_B
+  → WARNING
+  confidence: HIGH (structural comparison)
 ```
 
-#### Type 4: Correlation Rules
-Connect findings across categories to identify root causes.
+#### ④ Correlation Rules — cross-category root cause analysis
 
-```
-Rule: cache_miss_root_cause
-  IF cache_hit_ratio < 90%
-    AND shared_buffers < total_ram * 0.15
-    AND EXISTS(tables with high seq_scan count)
-  → FINDING:
-    title: "Low cache hit ratio caused by undersized shared_buffers and missing indexes"
-    description: "Your cache hit ratio is {ratio}% because shared_buffers is only
-                  {current} (should be ~{recommended}), AND {count} tables are doing
-                  full sequential scans that don't fit in cache."
-    sql_fix: [
-      "ALTER SYSTEM SET shared_buffers = '{recommended}';",
-      "CREATE INDEX CONCURRENTLY ... ON {table} ({columns});",
-      "SELECT pg_reload_conf();"
-    ]
-    impact: "Combined fix could improve query response time by 5-20x"
+```mermaid
+graph LR
+    subgraph "Findings from Individual Categories"
+        F1["Cache: hit ratio 73%"]
+        F2["Config: shared_buffers 128MB<br/>on 16GB server"]
+        F3["Tables: 3 tables with<br/>high seq_scan count"]
+        F4["Queries: top queries<br/>have high blks_read"]
+    end
 
-Rule: work_mem_spillover
-  IF EXISTS(queries with temp_blks_written > 0)
-    AND work_mem <= '4MB'
-  → FINDING:
-    title: "Queries spilling to disk due to default work_mem"
-    description: "{count} queries are writing temporary files because work_mem
-                  is at the default 4MB. These queries sorted/hashed {total_temp}
-                  of data to disk instead of memory."
-    sql_fix: "ALTER SYSTEM SET work_mem = '{recommended}';"
-    impact: "Eliminating disk spill could speed up affected queries by 3-10x"
+    CORR["Correlator"]
+    
+    subgraph "Correlated Finding"
+        CF["ROOT CAUSE: Undersized shared_buffers<br/>+ missing indexes cause cascade:<br/><br/>① shared_buffers is 128MB (0.8% of RAM)<br/>② Large tables can't fit in cache<br/>③ Queries read from disk on every call<br/>④ Cache hit ratio drops to 73%<br/><br/>Fix both to resolve:<br/>1. ALTER SYSTEM SET shared_buffers = '4GB'<br/>2. CREATE INDEX on hot tables<br/><br/>Estimated impact: cache ratio 73% → 97%"]
+    end
+
+    F1 --> CORR
+    F2 --> CORR
+    F3 --> CORR
+    F4 --> CORR
+    CORR --> CF
 ```
 
-### Analysis Flow per Category
+Correlation rules connect findings that share a root cause:
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Analyzer Module                       │
-│                                                         │
-│  1. Collect:  Run category-specific SQL queries          │
-│       │                                                 │
-│  2. Evaluate: Apply rules (threshold → formula →        │
-│       │        pattern → correlation)                   │
-│       │                                                 │
-│  3. Score:    Start at 100, subtract for each finding   │
-│       │        CRITICAL: -20 to -40 per finding         │
-│       │        WARNING:  -5 to -20 per finding          │
-│       │        INFO:     -1 to -5 per finding           │
-│       │        Floor at 0                               │
-│       │                                                 │
-│  4. Recommend: Generate Finding objects with SQL fixes   │
-│       │         and estimated impact                    │
-│       │                                                 │
-│  5. Return:   CategoryScore { score, findings, weight } │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Overall Score Computation
-
-```
-overall_score = Σ (category_score × category_weight)
-
-Where weights sum to 1.0:
-  configuration: 0.15
-  indexes:       0.15
-  queries:       0.15
-  tables:        0.10
-  cache:         0.10
-  vacuum:        0.10
-  connections:   0.08
-  locks:         0.05
-  storage:       0.05
-  sequences:     0.03
-  replication:   0.02  (0 if no replicas, weight redistributed)
-  schema:        0.02
-```
+| Pattern | Categories Involved | Root Cause |
+|:---|:---|:---|
+| Low cache + small buffers + seq scans | Cache, Config, Tables | Undersized memory + missing indexes |
+| Temp file spill + default work_mem | Queries, Config | work_mem needs tuning |
+| High dead tuples + old vacuum + bloat | Vacuum, Tables, Storage | Autovacuum misconfigured |
+| Connection exhaustion + idle conns | Connections, Config | Need connection pooler |
+| Replica lag + high WAL rate + many writes | Replication, Storage, Tables | Write-heavy workload outpacing replica |
 
 ---
 
 ## Prediction & Impact Estimation
 
-### How We Estimate Improvements
+### Index Impact Model
 
-For each recommendation, we estimate the performance impact. Here's how:
+Uses PostgreSQL's cost model constants to estimate speedup:
 
-#### Index Recommendations
+```mermaid
+graph TB
+    subgraph "Current State (Sequential Scan)"
+        CS1["Table: orders"]
+        CS2["Rows: 8.2M"]
+        CS3["Pages: 163,840"]
+        CS4["Seq scans/hour: 23,000"]
+        CS5["Cost = seq_page_cost × pages<br/>= 1.0 × 163,840 = 163,840"]
+    end
 
-**Method**: Compare sequential scan cost vs index scan cost using PostgreSQL's cost model.
+    subgraph "Predicted State (Index Scan)"
+        PS1["Btree depth: log₂(8.2M) ≈ 23"]
+        PS2["Pages to read: ~3-5"]
+        PS3["Cost = random_page_cost × depth<br/>= 1.1 × 23 ≈ 25"]
+    end
 
+    subgraph "Impact"
+        IMP["Speedup: 163,840 / 25 ≈ 6,500x<br/>Time saved: ~640 CPU-sec/hour<br/>Confidence: MEDIUM<br/>(assumes point lookup selectivity)"]
+    end
+
+    CS5 --> IMP
+    PS3 --> IMP
 ```
-Sequential scan cost:
-  cost_seq = seq_page_cost × pages + cpu_tuple_cost × rows
 
-Index scan cost (btree):
-  cost_idx = random_page_cost × log2(pages) + cpu_index_tuple_cost × selectivity × rows
+### Configuration Impact Model
 
-Estimated speedup = cost_seq / cost_idx
-```
-
-**What we know from stats**:
-- `pg_stat_user_tables.seq_scan` → how often this scan happens
-- `pg_stat_user_tables.seq_tup_read` → rows scanned per seq scan
-- `pg_class.relpages` → table pages on disk
-- `pg_class.reltuples` → estimated row count
-- `pg_stat_statements.mean_exec_time` → current query time (if available)
-
-**Example output**:
-> "Table `orders` (8.2M rows, 1.2GB) receives 23,000 seq scans/hour.
-> Adding `CREATE INDEX CONCURRENTLY idx_orders_customer_id ON orders(customer_id)`
-> would change scan from O(8.2M rows) to O(log₂ 8.2M ≈ 23 rows lookup).
-> **Estimated speedup: ~350,000x for this query pattern.**
-> **Estimated time saved: ~640 CPU-seconds/hour.**"
-
-#### Configuration Recommendations
-
-**Method**: Formula-based estimation from documented PostgreSQL behavior.
-
-| Change | Estimation Method | Example |
+| Parameter Change | Estimation Formula | Confidence |
 |:---|:---|:---|
-| Increase `shared_buffers` | `new_hit_ratio ≈ min(99%, current_ratio + (new_buffers - old_buffers) / db_size × 100)` | 128MB→2GB on 4GB DB: ~73%→95% hit ratio |
-| Increase `work_mem` | Count queries with `temp_blks_written > 0`. Each eliminated temp file ≈ 3-10x speedup on that query. | Default 4MB→64MB: eliminates disk spill for 15 queries |
-| `checkpoint_completion_target` 0.5→0.9 | Spreads checkpoint I/O over longer period. Reduces I/O spikes by ~40%. | Smoother I/O, fewer latency spikes |
-| `random_page_cost` 4.0→1.1 (SSD) | Planner will prefer index scans. Count queries currently doing seq scan that have usable indexes. | May enable index usage for N queries |
+| `shared_buffers` ↑ | `Δ_hit_ratio ≈ min(99%, current + (new_size − old_size) / db_size × 100)` | MEDIUM |
+| `work_mem` ↑ | Count queries with `temp_blks > 0`. Each: ~3-10x speedup. | MEDIUM |
+| `checkpoint_completion_target` → 0.9 | Spreads I/O, reduces spikes ~40% | HIGH |
+| `random_page_cost` → 1.1 (SSD) | Planner prefers indexes. Count seq scans with usable indexes. | MEDIUM |
+| `max_connections` ↓ + PgBouncer | Saves `N × ~10MB` per idle connection | HIGH |
 
-#### Vacuum Recommendations
-
-**Method**: Calculate space recovery and scan speedup.
-
-```
-Wasted space = n_dead_tup × avg_row_width
-Bloat ratio = n_dead_tup / (n_live_tup + n_dead_tup)
-Space recoverable = table_size × bloat_ratio
-
-Seq scan speedup after vacuum:
-  current_scan_pages = relpages
-  post_vacuum_pages = relpages × (1 - bloat_ratio)
-  speedup = current_scan_pages / post_vacuum_pages
-```
-
-**Example output**:
-> "Table `events` has 42% dead tuple ratio (3.1M dead / 7.4M total).
-> `VACUUM ANALYZE events;` would reclaim ~1.8GB of space and make
-> sequential scans **1.7x faster**."
-
-#### Connection Recommendations
-
-**Method**: Calculate memory savings from reducing idle connections.
+### Vacuum Impact Model
 
 ```
-Memory per connection ≈ work_mem + temp_buffers + ~10MB overhead
-Idle connections × memory_per_conn = wasted memory
+Space recoverable = table_size × (n_dead_tup / (n_live_tup + n_dead_tup))
+Scan speedup = 1 / (1 − dead_ratio)
 
-If using PgBouncer with pool_size = 20 instead of max_connections = 500:
-  Memory saved = (500 - 20) × memory_per_conn
-  This memory becomes available for shared_buffers or OS page cache
+Example: 42% dead tuples on 4.3GB table
+  Space savings: 4.3GB × 0.42 = 1.8GB
+  Scan speedup: 1 / 0.58 = 1.7x
+  Confidence: HIGH (dead tuple count is exact)
 ```
 
 ---
 
 ## Accuracy & Confidence Model
 
-Every finding includes a **confidence level**:
+Every finding carries a confidence level indicating how reliable the measurement and prediction are.
 
-### Confidence Tiers
+```mermaid
+graph LR
+    subgraph "🟢 HIGH Confidence (90%+)"
+        H1["Cache hit ratio<br/>(exact computation)"]
+        H2["Unused indexes<br/>(binary: 0 scans)"]
+        H3["Dead tuple count<br/>(exact from stats)"]
+        H4["Connection count<br/>(exact snapshot)"]
+        H5["Txid wraparound risk<br/>(exact counter)"]
+        H6["Sequence exhaustion<br/>(exact math)"]
+        H7["Config vs formula<br/>(documented rules)"]
+    end
 
-| Confidence | Label | When Applied | Accuracy |
-|:---|:---|:---|:---|
-| **HIGH** (90%+) | "Verified" | Threshold rules with well-documented PG best practices | Very reliable. Based on PostgreSQL documentation and community consensus over 20+ years. |
-| **MEDIUM** (70-90%) | "Estimated" | Formula rules, pattern-based index suggestions | Usually correct. The recommendation is sound but the quantified impact may vary by ±2-5x. |
-| **LOW** (50-70%) | "Heuristic" | Bloat estimation without `pgstattuple`, schema suggestions | Directionally correct but numbers are rough. Use as a starting point for investigation. |
+    subgraph "🟡 MEDIUM Confidence (70-90%)"
+        M1["Missing index suggestion<br/>(pattern-based)"]
+        M2["Impact estimation<br/>(cost model)"]
+        M3["Bloat estimation<br/>(statistical)"]
+        M4["Config impact prediction<br/>(formula-based)"]
+        M5["Workload classification<br/>(heuristic)"]
+    end
 
-### What Affects Accuracy
-
-| Factor | Impact on Accuracy | Mitigation |
-|:---|:---|:---|
-| **Stats age** | If `pg_stat_reset` was recent, counters may not reflect real workload | We check `stats_reset` timestamp and warn if < 24 hours |
-| **Workload variability** | A batch job at 3am may skew daily averages | Agent mode captures time-series, enabling workload pattern detection |
-| **PG version** | Newer versions have more stats views | We detect version and adjust available checks |
-| **Missing extensions** | No `pg_stat_statements` = no query analysis | We report what we couldn't analyze and recommend extension installation |
-| **Bloat estimation** | Without `pgstattuple`, bloat is statistical guess | We clearly label as "estimated" and suggest `pgstattuple` for exact numbers |
-| **RAM detection** | Via SQL we can't always know total system RAM | Tier 3 (agent) reads `/proc/meminfo`; otherwise we ask or infer from `shared_buffers` |
-
-### Per-Category Accuracy
-
-| Category | Confidence | Notes |
-|:---|:---|:---|
-| **Configuration** | 🟢 HIGH | Well-documented formulas. The "25% RAM for shared_buffers" rule is decades old. |
-| **Unused Indexes** | 🟢 HIGH | Binary check: `idx_scan = 0`. Only risk: stats haven't accumulated long enough. We check stats age. |
-| **Missing Indexes** | 🟡 MEDIUM | We detect the symptom (high seq_scan on large table) but the exact columns need `pg_qualstats` (Tier 3) or manual investigation. |
-| **Table Dead Tuples** | 🟢 HIGH | Direct read from `pg_stat_user_tables`. Numbers are exact. |
-| **Table Bloat** | 🟡 MEDIUM | Statistical estimation. Can be off by 10-30%. `pgstattuple` gives exact answer. |
-| **Query Analysis** | 🟢 HIGH | `pg_stat_statements` numbers are exact. The improvement estimate after fix is MEDIUM confidence. |
-| **Cache Hit Ratio** | 🟢 HIGH | Direct computation from `blks_hit / (blks_hit + blks_read)`. Exact number. |
-| **Connection Analysis** | 🟢 HIGH | Direct read from `pg_stat_activity`. Current snapshot is exact. |
-| **Vacuum Status** | 🟢 HIGH | Timestamps and counts are exact from `pg_stat_user_tables`. |
-| **Txid Wraparound** | 🟢 HIGH | `age(datfrozenxid)` is exact. Threshold of 2B is a known PostgreSQL limit. |
-| **Lock Detection** | 🟢 HIGH | `pg_locks` shows current state exactly. But it's a point-in-time snapshot — transient locks may be missed. |
-| **Sequence Exhaustion** | 🟢 HIGH | `last_value / max_value` is exact math. |
-| **Improvement Estimates** | 🟡 MEDIUM | Order-of-magnitude correct (e.g., "5-20x faster") but not precise. Real improvement depends on workload, hardware, and concurrent access patterns. |
-
-### How We Validate Predictions
-
-For each improvement estimate, we show the math:
-
-```
-┌─────────────────────────────────────────────────────┐
-│ FINDING: Missing index on orders.customer_id        │
-│ Severity: WARNING                                   │
-│ Confidence: MEDIUM                                  │
-│                                                     │
-│ Current State:                                      │
-│   • Table: orders (8.2M rows, 1.2GB, 163,840 pages)│
-│   • Sequential scans: 23,000/hour                   │
-│   • Avg rows per scan: 8,200,000 (full table)       │
-│                                                     │
-│ Prediction:                                         │
-│   • Index scan would read: ~23 pages (btree depth)  │
-│   • Speedup per query: ~7,000x                      │
-│   • Total CPU time saved: ~640 sec/hour              │
-│                                                     │
-│ Confidence Notes:                                   │
-│   • Speedup assumes single-row lookup pattern        │
-│   • Actual speedup depends on selectivity             │
-│   • Range queries would see less dramatic improvement│
-│                                                     │
-│ How to verify before applying:                      │
-│   EXPLAIN (ANALYZE, BUFFERS)                        │
-│   SELECT * FROM orders WHERE customer_id = 12345;   │
-│                                                     │
-│ Fix:                                                │
-│   CREATE INDEX CONCURRENTLY idx_orders_customer_id   │
-│   ON orders (customer_id);                          │
-│                                                     │
-│ ⚠️  Index creation on 1.2GB table takes ~30-60 sec  │
-│   CONCURRENTLY avoids locking writes                │
-└─────────────────────────────────────────────────────┘
+    subgraph "🔴 LOW Confidence (50-70%)"
+        L1["Schema design suggestions<br/>(subjective)"]
+        L2["Partitioning suggestions<br/>(workload-dependent)"]
+        L3["Long-term trend forecast<br/>(extrapolation)"]
+    end
 ```
 
-### Comparison with Verification
+### Validation Commands
 
-We always provide the user with commands to verify our predictions independently:
+Every prediction includes a command the user can run to verify independently:
 
-| Our Prediction | Verification Command |
+| Prediction | Verification |
 |:---|:---|
-| "This query does a sequential scan" | `EXPLAIN (ANALYZE, BUFFERS) <query>` |
-| "Cache hit ratio would improve" | Check `pg_stat_database` before/after `shared_buffers` change |
-| "Table has ~40% bloat" | `CREATE EXTENSION pgstattuple; SELECT * FROM pgstattuple('tablename');` |
-| "This index is unused" | `SELECT idx_scan FROM pg_stat_user_indexes WHERE indexrelname = 'idx_name';` |
-| "work_mem increase will stop disk spill" | `SET work_mem = '64MB'; EXPLAIN (ANALYZE, BUFFERS) <query>;` |
+| "Query does sequential scan" | `EXPLAIN (ANALYZE, BUFFERS) <query>` |
+| "Index would speed up query" | `SET enable_seqscan = off; EXPLAIN ANALYZE <query>;` |
+| "Table has ~40% bloat" | `CREATE EXTENSION pgstattuple; SELECT * FROM pgstattuple('table');` |
+| "work_mem increase stops disk spill" | `SET work_mem='64MB'; EXPLAIN (ANALYZE, BUFFERS) <query>;` |
+| "shared_buffers increase helps" | Compare `pg_stat_database.blks_hit` ratio before/after |
 
 ---
 
-## Agent Mode: Continuous Monitoring Architecture
+## Deployment Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Agent Process                         │
-│                                                             │
-│  ┌─────────────┐     ┌──────────────┐     ┌──────────────┐ │
-│  │  Scheduler   │────▶│  Collector    │────▶│  SQLite      │ │
-│  │  (tick every │     │  (SQL + OS)   │     │  (snapshots) │ │
-│  │   N seconds) │     └──────────────┘     └──────┬───────┘ │
-│  └─────────────┘                                  │         │
-│                                                   ▼         │
-│  ┌─────────────┐     ┌──────────────┐     ┌──────────────┐ │
-│  │  HTTP Server │◀────│  Analyzer     │◀────│  Rate Calc   │ │
-│  │  (dashboard  │     │  (on-demand   │     │  (deltas /   │ │
-│  │   + API)     │     │   or periodic)│     │   time)      │ │
-│  └─────────────┘     └──────────────┘     └──────────────┘ │
-│                                                             │
-│  Snapshot interval: 30-60 seconds (configurable)            │
-│  Analysis interval: 5 minutes (configurable)                │
-│  Retention: 30 days (configurable)                          │
-│  Memory usage: ~20-50MB                                     │
-│  CPU usage: <1% (brief spike during collection)             │
-└─────────────────────────────────────────────────────────────┘
+### Scan Mode
+
+```mermaid
+graph LR
+    USER["User workstation"]
+    PG["Target PostgreSQL<br/>(RDS / self-hosted)"]
+    RPT["HTML Report"]
+
+    USER -->|"pgaioptimizer scan --host ..."| PG
+    PG -->|"SQL results (2-5 sec)"| USER
+    USER -->|"generate"| RPT
+
+    style USER fill:#1e293b,stroke:#3b82f6,color:#fff
+    style PG fill:#1e293b,stroke:#10b981,color:#fff
+    style RPT fill:#1e293b,stroke:#f59e0b,color:#fff
 ```
 
-### Rate Computation
+Stateless. Connect → collect → analyze → report → disconnect. No storage.
 
-Cumulative counters → rates using adjacent snapshots:
+### Agent Mode
 
-```go
-type RateCalculator struct {
-    previous *Snapshot
-    current  *Snapshot
-}
+```mermaid
+graph TB
+    subgraph "PostgreSQL Server"
+        PG["PostgreSQL"]
+        AGENT["pgaioptimizer agent<br/>(Go binary, ~20MB RAM)"]
+        DUCK["DuckDB file<br/>(30-80MB on disk)"]
+        PROC["/proc/*<br/>OS metrics"]
+        CONF["postgresql.conf"]
+        LOGS["pg_log/*.log"]
+    end
 
-func (r *RateCalculator) BlocksReadPerSec() float64 {
-    delta := r.current.BlksRead - r.previous.BlksRead
-    timeDelta := r.current.TakenAt.Sub(r.previous.TakenAt).Seconds()
-    return float64(delta) / timeDelta
-}
+    subgraph "User Browser"
+        DASH["Dashboard :9090"]
+    end
 
-func (r *RateCalculator) QueriesPerSec() float64 {
-    delta := r.current.TotalQueries - r.previous.TotalQueries
-    timeDelta := r.current.TakenAt.Sub(r.previous.TakenAt).Seconds()
-    return float64(delta) / timeDelta
-}
+    AGENT -->|"SQL every 60s"| PG
+    AGENT -->|"read"| PROC
+    AGENT -->|"parse"| CONF
+    AGENT -->|"parse"| LOGS
+    AGENT -->|"write snapshots"| DUCK
+    DASH -->|"HTTP API"| AGENT
+
+    style PG fill:#1e293b,stroke:#10b981,color:#fff
+    style AGENT fill:#1e293b,stroke:#3b82f6,color:#fff
+    style DUCK fill:#1e293b,stroke:#f59e0b,color:#fff
+    style DASH fill:#1e293b,stroke:#8b5cf6,color:#fff
 ```
 
-### Trend Detection
+Runs on PG host. Full Tier 3 access. Serves dashboard locally.
 
-With historical snapshots, we can detect:
-- **Degrading cache hit ratio** → growing dataset outpacing shared_buffers
-- **Rising dead tuple count** → autovacuum falling behind
-- **Increasing query time** → workload growth or plan regression
-- **Connection count growth** → approaching max_connections
+### Server Mode (multi-instance)
 
-```go
-type TrendAnalysis struct {
-    Metric     string
-    Direction  string  // "increasing", "decreasing", "stable"
-    ChangeRate float64 // per hour
-    Forecast   string  // "will hit critical threshold in ~3 days"
-}
+```mermaid
+graph TB
+    subgraph "Central Server"
+        SRV["pgaioptimizer server :8080"]
+        DB["DuckDB<br/>(all instances)"]
+        WEB["React Dashboard"]
+    end
+
+    subgraph "Instance 1: Production RDS"
+        PG1["PostgreSQL"]
+    end
+
+    subgraph "Instance 2: Staging (self-hosted)"
+        PG2["PostgreSQL"]
+        AG2["Agent :9090"]
+    end
+
+    subgraph "Instance 3: Analytics RDS"
+        PG3["PostgreSQL"]
+    end
+
+    SRV -->|"scan every 5m"| PG1
+    SRV -->|"pull from agent API"| AG2
+    AG2 -->|"local SQL"| PG2
+    SRV -->|"scan every 5m"| PG3
+    SRV --> DB
+    WEB --> SRV
+
+    style SRV fill:#1e293b,stroke:#3b82f6,color:#fff
+    style DB fill:#1e293b,stroke:#f59e0b,color:#fff
+    style PG1 fill:#1e293b,stroke:#10b981,color:#fff
+    style PG2 fill:#1e293b,stroke:#10b981,color:#fff
+    style PG3 fill:#1e293b,stroke:#10b981,color:#fff
+    style AG2 fill:#1e293b,stroke:#8b5cf6,color:#fff
 ```
+
+---
+
+## Security Model
+
+```mermaid
+graph LR
+    subgraph "Minimal Permissions Required"
+        R1["pg_monitor role<br/>(PG10+, read-only stats)"]
+        R2["pg_read_all_stats<br/>(alternative)"]
+    end
+
+    subgraph "What We NEVER Do"
+        N1["❌ No writes to target DB"]
+        N2["❌ No DDL execution"]
+        N3["❌ No temp tables"]
+        N4["❌ No function creation"]
+        N5["❌ No data access (SELECT on user tables)"]
+    end
+```
+
+**Recommended connection setup:**
+```sql
+-- Create a dedicated read-only role
+CREATE ROLE pgaioptimizer LOGIN PASSWORD '...';
+GRANT pg_monitor TO pgaioptimizer;
+-- For pg_stat_statements access:
+GRANT EXECUTE ON FUNCTION pg_stat_statements_reset TO pgaioptimizer; -- optional
+```
+
+All credentials are stored in memory only during the session (scan mode) or in an encrypted config file (agent/server mode). Never logged, never transmitted.
