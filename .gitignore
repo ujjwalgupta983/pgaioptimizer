@@ -1,0 +1,45 @@
+# Go
+/pgaioptimizer
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+*.env
+
+# SQLite data
+*.db
+*.sqlite
+*.sqlite3
+
+# Reports
+*.html
+!web/**/*.html
+!README.md
+
+# Build
+/build/
+/bin/
