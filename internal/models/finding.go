@@ -28,8 +28,8 @@ type Finding struct {
 // CategoryScore holds the analysis results for one category.
 type CategoryScore struct {
 	Category    string    `json:"category"`
-	Score       float64   `json:"score"`       // 0-100
-	Weight      float64   `json:"weight"`      // Percentage weight in overall score
+	Score       float64   `json:"score"`  // 0-100
+	Weight      float64   `json:"weight"` // Percentage weight in overall score
 	Findings    []Finding `json:"findings"`
 	Description string    `json:"description"` // Human-readable category description
 }
@@ -54,18 +54,18 @@ func Grade(score float64) string {
 
 // ServerInfo contains metadata about the analyzed PostgreSQL instance.
 type ServerInfo struct {
-	Version          string   `json:"version"`
-	VersionNum       int      `json:"version_num"`
-	Host             string   `json:"host"`
-	Port             int      `json:"port"`
-	Database         string   `json:"database"`
-	IsSuperuser      bool     `json:"is_superuser"`
-	Extensions       []string `json:"extensions"`
-	Uptime           string   `json:"uptime"`
-	DataDirectory    string   `json:"data_directory,omitempty"`
-	ServerOS         string   `json:"server_os,omitempty"`
-	TotalRAMBytes    int64    `json:"total_ram_bytes,omitempty"`
-	ConnectionTier   string   `json:"connection_tier"` // "sql_only", "cloud_enriched", "agent"
+	Version        string   `json:"version"`
+	VersionNum     int      `json:"version_num"`
+	Host           string   `json:"host"`
+	Port           int      `json:"port"`
+	Database       string   `json:"database"`
+	IsSuperuser    bool     `json:"is_superuser"`
+	Extensions     []string `json:"extensions"`
+	Uptime         string   `json:"uptime"`
+	DataDirectory  string   `json:"data_directory,omitempty"`
+	ServerOS       string   `json:"server_os,omitempty"`
+	TotalRAMBytes  int64    `json:"total_ram_bytes,omitempty"`
+	ConnectionTier string   `json:"connection_tier"` // "sql_only", "cloud_enriched", "agent"
 }
 
 // HealthReport is the complete output of an analysis run.

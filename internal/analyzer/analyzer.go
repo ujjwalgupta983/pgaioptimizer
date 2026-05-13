@@ -34,12 +34,12 @@ func NewRegistry() *Registry {
 	return &Registry{
 		analyzers: []Analyzer{
 			// Phase 2: Core analyzers
-			// &ConfigurationAnalyzer{},
-			// &IndexAnalyzer{},
-			// &TableAnalyzer{},
-			// &QueryAnalyzer{},
-			// &ConnectionAnalyzer{},
-			// &VacuumAnalyzer{},
+			&ConfigurationAnalyzer{},
+			&IndexAnalyzer{},
+			&TableAnalyzer{},
+			&QueryAnalyzer{},
+			&ConnectionAnalyzer{},
+			&VacuumAnalyzer{},
 
 			// Phase 3: Extended analyzers
 			// &CacheAnalyzer{},
