@@ -42,12 +42,12 @@ func NewRegistry() *Registry {
 			&VacuumAnalyzer{},
 
 			// Phase 3: Extended analyzers
-			// &CacheAnalyzer{},
-			// &LockAnalyzer{},
-			// &SequenceAnalyzer{},
-			// &StorageAnalyzer{},
-			// &ReplicationAnalyzer{},
-			// &SchemaAnalyzer{},
+			&CacheAnalyzer{},
+			&LockAnalyzer{},
+			&SequenceAnalyzer{},
+			&StorageAnalyzer{},
+			&ReplicationAnalyzer{},
+			&SchemaAnalyzer{},
 		},
 	}
 }

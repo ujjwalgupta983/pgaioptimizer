@@ -70,11 +70,12 @@ type ServerInfo struct {
 
 // HealthReport is the complete output of an analysis run.
 type HealthReport struct {
-	OverallScore float64         `json:"overall_score"`
-	Grade        string          `json:"grade"`
-	Categories   []CategoryScore `json:"categories"`
-	ServerInfo   ServerInfo      `json:"server_info"`
-	GeneratedAt  time.Time       `json:"generated_at"`
-	AnalysisTier string          `json:"analysis_tier"` // "tier1", "tier2", "tier3"
-	Duration     time.Duration   `json:"duration"`
+	OverallScore float64          `json:"overall_score"`
+	Grade        string           `json:"grade"`
+	Categories   []*CategoryScore `json:"categories"`
+	Correlations []Finding        `json:"correlations"`
+	ServerInfo   ServerInfo       `json:"server_info"`
+	GeneratedAt  time.Time        `json:"generated_at"`
+	AnalysisTier string           `json:"analysis_tier"` // "tier1", "tier2", "tier3"
+	Duration     time.Duration    `json:"duration"`
 }
