@@ -12,7 +12,7 @@ export const FindingsList: React.FC<FindingsListProps> = ({ findings }) => {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+    <div className="flex flex-col gap-4">
       {findings.map((finding, idx) => (
         <FindingItem key={idx} finding={finding} />
       ))}
@@ -32,75 +32,49 @@ const FindingItem: React.FC<{ finding: Finding }> = ({ finding }) => {
     }
   };
 
-  const getBgColor = () => {
-    switch (finding.severity) {
-      case 'critical': return 'rgba(239, 68, 68, 0.1)';
-      case 'warning': return 'rgba(245, 158, 11, 0.1)';
-      case 'info': return 'rgba(59, 130, 246, 0.1)';
-      default: return 'rgba(34, 197, 94, 0.1)';
-    }
-  };
-
-  const getBorderColor = () => {
-    switch (finding.severity) {
-      case 'critical': return 'var(--severity-critical)';
-      case 'warning': return 'var(--severity-warning)';
-      case 'info': return 'var(--accent-blue)';
-      default: return 'var(--severity-ok)';
-    }
-  };
-
   return (
-    <div style={{ 
-      display: 'flex', 
-      flexDirection: 'column',
-      padding: '1rem', 
-      borderRadius: '12px', 
-      background: getBgColor(), 
-      borderLeft: `4px solid ${getBorderColor()}`,
-      transition: 'all 0.2s ease-in-out'
-    }}>
+    <div className={`finding-item ${finding.severity}`}>
       <div 
-        style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start', cursor: 'pointer' }}
+        className="finding-item-header"
         onClick={() => setExpanded(!expanded)}
       >
         <div style={{ flexShrink: 0, marginTop: '2px' }}>{getIcon()}</div>
         <div style={{ flex: 1 }}>
-          <h4 style={{ fontWeight: '600', marginBottom: '0.25rem' }}>{finding.title}</h4>
-          <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{finding.description}</p>
+          <h4 className="font-bold text-primary mb-2">{finding.title}</h4>
+          <p className="text-secondary text-sm">{finding.description}</p>
         </div>
-        <button style={{ background: 'none', border: 'none', color: 'white', cursor: 'pointer', padding: '0.25rem' }}>
+        <button style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', padding: '0.25rem' }}>
           {expanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
         </button>
       </div>
 
       {expanded && (
-        <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid rgba(255,255,255,0.1)', animation: 'fadeIn 0.2s ease-in-out' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+        <div className="mt-4 pt-4 animate-fade-in" style={{ borderTop: '1px solid var(--card-border)' }}>
+          <div className="grid-2 mb-4" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
             <div>
-              <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Current Value</span>
-              <div style={{ fontWeight: '500' }}>{finding.current_value}</div>
+              <span className="text-xs text-muted">Current Value</span>
+              <div className="font-medium mt-2">{finding.current_value}</div>
             </div>
             {finding.recommended_value && (
               <div>
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Recommended</span>
-                <div style={{ fontWeight: '500', color: 'var(--severity-ok)' }}>{finding.recommended_value}</div>
+                <span className="text-xs text-muted">Recommended</span>
+                <div className="font-medium mt-2 text-ok" style={{ color: 'var(--severity-ok)' }}>{finding.recommended_value}</div>
               </div>
             )}
           </div>
           
-          <div style={{ marginBottom: '1rem' }}>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Impact</span>
-            <div style={{ fontSize: '0.9rem' }}>{finding.impact}</div>
+          <div className="mb-4">
+            <span className="text-xs text-muted">Impact</span>
+            <div className="text-sm mt-2">{finding.impact}</div>
           </div>
 
           {finding.sql_fix && (
-            <div style={{ background: 'rgba(0,0,0,0.5)', padding: '1rem', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem', color: 'var(--text-secondary)' }}>
+            <div className="terminal-block">
+              <div className="terminal-header">
                 <Terminal size={14} />
-                <span style={{ fontSize: '0.75rem', textTransform: 'uppercase' }}>SQL Fix</span>
+                <span className="text-xs">SQL Fix</span>
               </div>
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.85rem', color: 'var(--accent-blue)' }}>
+              <pre className="terminal-code">
                 {finding.sql_fix}
               </pre>
             </div>

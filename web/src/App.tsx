@@ -40,7 +40,7 @@ const App: React.FC = () => {
   }
 
   // Calculate total findings
-  const totalFindings = report.categories.reduce((acc, cat) => acc + cat.findings.length, 0);
+  const totalFindings = report.categories.reduce((acc, cat) => acc + (cat.findings ? cat.findings.length : 0), 0);
 
   // Get active category for findings view
   const activeFindings = selectedCategory 
@@ -51,15 +51,15 @@ const App: React.FC = () => {
     <div className="dashboard-container">
       <header className="animate-fade-in">
         <div className="logo-section">
-          <Database className="text-blue-500" size={32} color="#3b82f6" />
+          <Database className="text-blue-500" size={32} color="var(--accent-blue)" />
           <h1 className="logo-text">pgaioptimizer</h1>
         </div>
-        <div className="flex gap-4">
-          <div style={{ display: 'flex', gap: '1rem', color: 'var(--text-secondary)', fontSize: '0.9rem', alignItems: 'center' }}>
-            <span>{report.server_info.host}:{report.server_info.port}/{report.server_info.database}</span>
-            <span style={{ padding: '2px 8px', borderRadius: '12px', background: 'rgba(255,255,255,0.1)' }}>{report.server_info.version}</span>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3 text-secondary text-sm">
+            <span className="font-medium">{report.server_info.host}:{report.server_info.port}/{report.server_info.database}</span>
+            <span className="badge badge-info">{report.server_info.version.split(' ')[1] || 'PostgreSQL'}</span>
           </div>
-          <button className="glass-card" style={{ padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'rgba(255,255,255,0.05)', marginLeft: '1rem' }}>
+          <button className="btn">
             <Settings size={18} />
             <span>Settings</span>
           </button>
@@ -69,41 +69,40 @@ const App: React.FC = () => {
       <main>
         <section className="score-overview">
           <div className="glass-card overall-score-card animate-fade-in">
-            <h2 style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '1.5rem', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Overall Health</h2>
-            <div style={{ position: 'relative', width: '200px', height: '200px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <svg width="200" height="200" viewBox="0 0 200 200">
-                <circle cx="100" cy="100" r="80" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="12" />
+            <h2 className="text-xs text-secondary mb-6">Overall Health</h2>
+            <div className="circular-chart-container">
+              <svg className="circular-chart-svg" width="200" height="200" viewBox="0 0 200 200">
+                <circle cx="100" cy="100" r="80" className="circular-chart-bg" />
                 <circle 
-                  cx="100" cy="100" r="80" fill="none" stroke={report.overall_score > 80 ? 'var(--severity-ok)' : report.overall_score > 60 ? 'var(--severity-warning)' : 'var(--severity-critical)'} strokeWidth="12" 
+                  cx="100" cy="100" r="80" 
+                  className={`circular-chart-path ${report.overall_score < 60 ? 'glow-critical' : ''}`}
+                  stroke={report.overall_score > 80 ? 'var(--severity-ok)' : report.overall_score > 60 ? 'var(--severity-warning)' : 'var(--severity-critical)'} 
                   strokeDasharray="502.4" strokeDashoffset={502.4 * (1 - report.overall_score/100)} 
-                  strokeLinecap="round"
-                  style={{ transform: 'rotate(-90deg)', transformOrigin: 'center', transition: 'stroke-dashoffset 1s ease-in-out' }}
                 />
-                <text x="100" y="105" textAnchor="middle" fontSize="48" fontWeight="bold" fill="white">{Math.round(report.overall_score)}</text>
-                <text x="100" y="135" textAnchor="middle" fontSize="16" fill="var(--text-secondary)">Grade {report.grade}</text>
               </svg>
+              <div className="circular-chart-text">
+                <span style={{ fontSize: '3rem', fontWeight: '800', lineHeight: 1 }}>{Math.round(report.overall_score)}</span>
+                <span className="text-sm text-secondary font-medium mt-2">Grade {report.grade}</span>
+              </div>
             </div>
-            <p style={{ marginTop: '1.5rem', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-              {totalFindings} issues detected
+            <p className="text-sm text-secondary mt-6">
+              <span className="font-bold text-primary">{totalFindings}</span> issues detected
             </p>
           </div>
 
-          <div className="glass-card animate-fade-in" style={{ padding: '2rem', display: 'flex', flexDirection: 'column', gap: '1.5rem', animationDelay: '0.1s', gridColumn: 'span 2' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h2 style={{ fontSize: '1.2rem', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <div className="glass-card animate-fade-in" style={{ padding: '2.5rem 2rem', gridColumn: 'span 1', animationDelay: '0.1s' }}>
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="flex items-center gap-2 font-bold" style={{ fontSize: '1.25rem' }}>
                 {selectedCategory ? `${selectedCategory.charAt(0).toUpperCase() + selectedCategory.slice(1)} Findings` : 'Cross-Category Root Causes'}
                 {selectedCategory && (
-                  <button 
-                    onClick={() => setSelectedCategory(null)}
-                    style={{ fontSize: '0.8rem', padding: '0.2rem 0.5rem', background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: '4px', color: 'white', cursor: 'pointer', marginLeft: '1rem' }}
-                  >
+                  <button className="badge badge-info ml-4 cursor-pointer" onClick={() => setSelectedCategory(null)}>
                     Clear Filter
                   </button>
                 )}
               </h2>
             </div>
             
-            <div style={{ maxHeight: '250px', overflowY: 'auto', paddingRight: '1rem' }}>
+            <div className="custom-scrollbar" style={{ maxHeight: '300px', overflowY: 'auto', paddingRight: '1rem' }}>
               <FindingsList findings={activeFindings} />
             </div>
           </div>
@@ -113,42 +112,43 @@ const App: React.FC = () => {
           {report.categories.map((cat, i) => (
             <div 
               key={cat.category} 
-              className="glass-card category-card animate-fade-in" 
-              style={{ 
-                animationDelay: `${0.2 + i * 0.05}s`, 
-                cursor: 'pointer',
-                border: selectedCategory === cat.category ? '1px solid var(--accent-blue)' : undefined,
-                background: selectedCategory === cat.category ? 'rgba(59, 130, 246, 0.05)' : undefined
-              }}
+              className={`glass-card category-card interactive animate-fade-in ${selectedCategory === cat.category ? 'active' : ''}`}
+              style={{ animationDelay: `${0.2 + i * 0.05}s` }}
               onClick={() => setSelectedCategory(cat.category)}
             >
               <div className="category-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                  {cat.category === 'configuration' && <Settings size={20} color="var(--accent-blue)" />}
-                  {cat.category === 'indexes' && <Zap size={20} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-critical)'} />}
-                  {cat.category === 'queries' && <Search size={20} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
-                  {cat.category === 'vacuum' && <Shield size={20} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
-                  {cat.category === 'connections' && <Activity size={20} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-critical)'} />}
-                  {cat.category === 'cache' && <Database size={20} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-critical)'} />}
-                  {cat.category === 'locks' && <Shield size={20} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-critical)'} />}
-                  {cat.category === 'sequences' && <Activity size={20} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
-                  {cat.category === 'storage' && <Database size={20} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
-                  {cat.category === 'replication' && <Activity size={20} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
-                  {cat.category === 'schema' && <LayoutDashboard size={20} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
-                  {cat.category === 'tables' && <LayoutDashboard size={20} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-critical)'} />}
+                <div className="flex items-center gap-3">
+                  {cat.category === 'configuration' && <Settings size={22} color="var(--accent-blue)" />}
+                  {cat.category === 'indexes' && <Zap size={22} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-critical)'} />}
+                  {cat.category === 'queries' && <Search size={22} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
+                  {cat.category === 'vacuum' && <Shield size={22} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
+                  {cat.category === 'connections' && <Activity size={22} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-critical)'} />}
+                  {cat.category === 'cache' && <Database size={22} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-critical)'} />}
+                  {cat.category === 'locks' && <Shield size={22} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-critical)'} />}
+                  {cat.category === 'sequences' && <Activity size={22} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
+                  {cat.category === 'storage' && <Database size={22} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
+                  {cat.category === 'replication' && <Activity size={22} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
+                  {cat.category === 'schema' && <LayoutDashboard size={22} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-warning)'} />}
+                  {cat.category === 'tables' && <LayoutDashboard size={22} color={cat.score > 80 ? 'var(--severity-ok)' : 'var(--severity-critical)'} />}
                   
                   <span className="category-title" style={{ textTransform: 'capitalize' }}>{cat.category}</span>
                 </div>
-                <span className={`badge`} style={{ background: cat.score > 80 ? 'var(--severity-ok)' : cat.score > 60 ? 'var(--severity-warning)' : 'var(--severity-critical)' }}>
+                <span className={`badge badge-${cat.score > 80 ? 'ok' : cat.score > 60 ? 'warning' : 'critical'}`}>
                   {Math.round(cat.score)}%
                 </span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: '1.5rem' }}>
-                <span className="finding-count">{cat.findings ? cat.findings.length : 0} findings</span>
-                <ChevronRight size={18} color="var(--text-secondary)" />
+              <div className="flex justify-between items-center mt-6">
+                <span className="finding-count font-medium text-muted">{cat.findings ? cat.findings.length : 0} findings</span>
+                <ChevronRight size={18} className="text-secondary" />
               </div>
-              <div style={{ width: '100%', height: '4px', background: 'rgba(255,255,255,0.05)', marginTop: '0.75rem', borderRadius: '2px', overflow: 'hidden' }}>
-                <div style={{ width: `${cat.score}%`, height: '100%', background: cat.score > 80 ? 'var(--severity-ok)' : cat.score > 60 ? 'var(--severity-warning)' : 'var(--severity-critical)' }} />
+              <div className="category-progress-bg">
+                <div 
+                  className="category-progress-fill" 
+                  style={{ 
+                    width: `${cat.score}%`, 
+                    background: cat.score > 80 ? 'var(--severity-ok)' : cat.score > 60 ? 'var(--severity-warning)' : 'var(--severity-critical)' 
+                  }} 
+                />
               </div>
             </div>
           ))}

@@ -4,6 +4,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ujjwalgupta983/pgaioptimizer/internal/models"
@@ -22,7 +23,7 @@ func New(ctx context.Context, dsn string) (*Collector, error) {
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
+	if err != nil {	
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
 
@@ -60,10 +61,12 @@ func (c *Collector) ServerInfo(ctx context.Context) (*models.ServerInfo, error) 
 	}
 
 	// Get version number
-	err = c.pool.QueryRow(ctx, "SHOW server_version_num").Scan(&info.VersionNum)
+	var versionNumStr string
+	err = c.pool.QueryRow(ctx, "SHOW server_version_num").Scan(&versionNumStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get version num: %w", err)
 	}
+	info.VersionNum, _ = strconv.Atoi(versionNumStr)
 
 	// Get current database
 	err = c.pool.QueryRow(ctx, "SELECT current_database()").Scan(&info.Database)
